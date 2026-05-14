@@ -111,6 +111,9 @@ export function runOfflineSimulation({
     creeps: initialRoom.creeps ?? 1,
     constructionProgress: initialRoom.constructionProgress ?? 0,
     failures: [],
+    spawnAttempts: 0,
+    spawnSuccesses: 0,
+    lastEvents: [],
   };
 
   const milestones = [];
@@ -129,12 +132,14 @@ export function runOfflineSimulation({
     );
 
     const spawnCost = nextSpawnCost(spawnRng, seeds.spawnConfig);
+    room.spawnAttempts += 1;
     if (
       room.energy >= spawnCost &&
       room.creeps < desiredCreepsForRcl(room.rcl)
     ) {
       room.energy -= spawnCost;
       room.creeps += 1;
+      room.spawnSuccesses += 1;
     }
 
     const upgradeSpend = Math.min(room.energy, 12 + room.creeps * 2);
@@ -155,6 +160,7 @@ export function runOfflineSimulation({
       room.controllerProgress -= nextRclProgress;
       room.rcl += 1;
       room.energyCapacity += 100;
+      room.lastEvents.push(`[RCL] tick ${tick}: reached RCL ${room.rcl}`);
       milestones.push({
         tick,
         rcl: room.rcl,
@@ -164,13 +170,20 @@ export function runOfflineSimulation({
     }
 
     if (room.energy < 0 || room.creeps <= 0) {
-      room.failures.push({
+      const failure = {
         tick,
         reason: "invalid colony state",
         energy: room.energy,
         creeps: room.creeps,
-      });
+      };
+      room.failures.push(failure);
+      room.lastEvents.push(`[FAIL] tick ${tick}: ${failure.reason} (energy=${failure.energy}, creeps=${failure.creeps})`);
       break;
+    }
+
+    // Keep only the last 20 notable events
+    if (room.lastEvents.length > 20) {
+      room.lastEvents = room.lastEvents.slice(-20);
     }
   }
 
@@ -181,6 +194,22 @@ export function runOfflineSimulation({
     failures: room.failures,
     milestones,
   });
+
+  // Build diagnostics for failed gates
+  const failedGates = gateResults.filter((g) => !g.ok);
+  const diagnostics = failedGates.length > 0
+    ? {
+        failedGates: failedGates.map((g) => g.name),
+        finalTick: room.tick,
+        finalRcl: room.rcl,
+        finalProgress: room.controllerProgress,
+        finalEnergy: room.energy,
+        creepCount: room.creeps,
+        spawnAttempts: room.spawnAttempts,
+        spawnSuccesses: room.spawnSuccesses,
+        lastEvents: room.lastEvents,
+      }
+    : undefined;
 
   return {
     ok: room.failures.length === 0 && gateResults.every((gate) => gate.ok),
@@ -208,6 +237,7 @@ export function runOfflineSimulation({
     },
     milestones,
     failures: room.failures,
+    diagnostics,
   };
 }
 
@@ -377,6 +407,28 @@ export function formatMarkdownReport(result) {
     }
   } else {
     lines.push("- None.");
+  }
+
+  if (result.diagnostics) {
+    const d = result.diagnostics;
+    lines.push(
+      ``,
+      `### Diagnostics (failed gates)`,
+      `- Failed gates: ${d.failedGates.join(", ")}`,
+      `- Final tick: ${d.finalTick}`,
+      `- Final RCL: ${d.finalRcl}`,
+      `- Controller progress: ${d.finalProgress}`,
+      `- Energy: ${d.finalEnergy}`,
+      `- Creep count: ${d.creepCount}`,
+      `- Spawn attempts: ${d.spawnAttempts}`,
+      `- Spawn successes: ${d.spawnSuccesses}`,
+    );
+    if (d.lastEvents?.length) {
+      lines.push(`- Recent events:`);
+      for (const evt of d.lastEvents) {
+        lines.push(`  - ${evt}`);
+      }
+    }
   }
 
   return lines.join("\n");
